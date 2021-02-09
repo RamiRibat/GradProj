@@ -1,3 +1,6 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
 import math
 import random
 import numpy as np
@@ -19,7 +22,7 @@ LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
 
-class MLPModel(nn.Module): # Rami (Done)
+class MLPModel(nn.Module):  # Rami (Done)
 
     def __init__(self, ip_dim, op_dim, hidden_sizes, activation=nn.ReLU, output_activation=None):
         super().__init__()
@@ -30,7 +33,7 @@ class MLPModel(nn.Module): # Rami (Done)
         #                     torch.nn.ReLU(),
         #                     torch.nn.Linear(100, 1),
         #                 )
-        
+
         # layers = [torch.nn.Linear(1, 200),
         #         torch.nn.ReLU(),
         #         torch.nn.Linear(200, 100),
@@ -47,15 +50,15 @@ class MLPModel(nn.Module): # Rami (Done)
         layers.append(nn.Linear(ip_dim, hidden_sizes[0]))
         layers.append(nn.ReLU())
         for i in range(1, len(hidden_sizes)):
-            if i < len(hidden_sizes)-1:
+            if i < len(hidden_sizes):
                 layers.append(nn.Linear(hidden_sizes[i-1], hidden_sizes[i]))
                 layers.append(nn.ReLU())
-            else: # if i == len(hidden_sizes)-1
-                layers.append(nn.Linear(hidden_sizes[-2], hidden_sizes[-1]))
+            # else: # if i == len(hidden_sizes)-1
+            #     layers.append(nn.Linear(hidden_sizes[-2], hidden_sizes[-1]))
 
 
         self.net = nn.Sequential(*layers)
-        print('self.net: ', self.net)
+        # print('self.net: ', self.net)
         # self.mu_log_std_layer = nn.Linear(hidden_sizes[-1], op_dim*2)
         self.mu_layer = nn.Linear(hidden_sizes[-1], op_dim)
         self.log_std_layer = nn.Linear(hidden_sizes[-1], op_dim)
@@ -71,12 +74,13 @@ class MLPModel(nn.Module): # Rami (Done)
         mu = self.mu_layer(net_out)
         log_std = self.log_std_layer(net_out)
         log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-        std = torch.exp(log_std) 
+        std = torch.exp(log_std)
 
-        # Transition distribution 
+        # Transition distribution
         delta = Normal(mu, std)
 
         return delta.rsample(), mu, std
+        # return mu, mu, 0
 
 
 class MLPModelEnsemble(nn.Module):
@@ -110,7 +114,7 @@ def compute_loss_model(train_x, train_y): # Rami (Done)
     loss_delta1 = loss_func(y, model(x)[0][0])
     loss_delta2 = loss_func(y, model(x)[1][0])
     loss_delta3 = loss_func(y, model(x)[2][0])
-    
+
     loss_model = (loss_delta1 + loss_delta2 + loss_delta3)/3
 
     return loss_delta1, loss_delta2, loss_delta3
@@ -121,14 +125,17 @@ def updateModel(train_x, train_y): # Rami (Done)
 
     # print("Model updating..")
     # Run one gradient descent step for model
+    clip = 1
     model_optimizer.zero_grad()
     loss_delta1, loss_delta2, loss_delta3 = compute_loss_model(train_x, train_y)
     for loss in [loss_delta1, loss_delta2, loss_delta3]:
         loss.backward() # Descent
+        torch.nn.utils.clip_grad_norm_(model.delta1.parameters(), clip)
     Adam(model.delta1.parameters(), lr=0.001).step()
     Adam(model.delta2.parameters(), lr=0.001).step()
     Adam(model.delta3.parameters(), lr=0.001).step()
     # model_optimizer.step()
+    return loss_delta1, loss_delta2, loss_delta3
 
 
 # Training data is 100 points in [0,1] inclusive regularly spaced
@@ -150,20 +157,22 @@ train_y = torch.sin(train_x * (2 * math.pi)) + torch.randn(train_x.size()) * mat
 
 
 
-model = MLPModelEnsemble(1, 1, [100, 100, 1])
+model = MLPModelEnsemble(1, 1, [10, 10, 10])
 model_optimizer = Adam(model.parameters(), lr=0.001) # Rami
 
 BATCH_SIZE = 128
-EPOCH = 500
+EPOCH = 1000
 
 
 for i in range(EPOCH):
-    print('Epoch: ', i)
     indexes = random.sample(range(0, 1000), BATCH_SIZE)
     inx = torch.tensor(indexes)
     # print(indexes)
     # print(train_x[indexes])
-    updateModel(train_x[inx], train_y[inx])
+    loss_delta1, loss_delta2, loss_delta3 = updateModel(train_x[inx], train_y[inx])
+    # print(f'Epoch {i}, Losses: {round(loss_delta1.item(), 4)} {round(loss_delta2.item(), 4)} {round(loss_delta3.item(), 4)}', end='\r')
+
+    print(f'Epoch {i}, Loss: {round(loss_delta1.item(), 4)}', end='\r')
 
 
 # Test points are regularly spaced along [0,1]
@@ -184,37 +193,37 @@ with torch.no_grad():
     # Get upper and lower confidence bounds
     # lower, upper = observed_pred.confidence_region()
     # Plot training data as black stars
-    ax.plot(train_x.numpy(), train_y.numpy(), '.', color = '#808080')
-    ax.plot(orig_x.numpy(), orig_y.numpy(), color = 'k', linewidth=3)
+    ax.plot(train_x.numpy(), train_y.numpy(), '.', label='Train Data', color = '#808080')
+    ax.plot(orig_x.numpy(), orig_y.numpy(), label= 'True Model', color = 'k', linewidth=3)
 
     # Plot predictive means as blue line
     mean1 = observed_pred[0][1]
     std1 = observed_pred[0][2]
     l1 = torch.reshape(mean1-std1, (1,-1)).numpy()[0]
     u1 = torch.reshape(mean1+std1, (1,-1)).numpy()[0]
-    ax.plot(test_x.numpy(), mean1, color = '#0000FF', linewidth=2) # Blue
+    ax.plot(test_x.numpy(), mean1, label = 'Model Blue', color = '#0000FF', linewidth=2) # Blue
     ax.fill_between(test_x.numpy(), l1, u1, alpha=0.25, color = '#0000FF')
 
-    mean2 = observed_pred[1][1]
-    std2 = observed_pred[1][2]
-    l2 = torch.reshape(mean2-std2, (1,-1)).numpy()[0]
-    u2 = torch.reshape(mean2+std2, (1,-1)).numpy()[0]
-    ax.plot(test_x.numpy(), mean2, color = '#006633', linewidth=2) # green
-    ax.fill_between(test_x.numpy(), l2, u2, alpha=0.25, color = '#006633')
-
-    mean3 = observed_pred[2][1]
-    std3= observed_pred[2][2]
-    l3 = torch.reshape(mean3-std3, (1,-1)).numpy()[0]
-    u3 = torch.reshape(mean3+std3, (1,-1)).numpy()[0]
-    ax.plot(test_x.numpy(), mean3, color = '#FF0000', linewidth=2) # Red
-    ax.fill_between(test_x.numpy(), l3, u3, alpha=0.25, color = '#FF0000')
+    # mean2 = observed_pred[1][1]
+    # std2 = observed_pred[1][2]
+    # l2 = torch.reshape(mean2-std2, (1,-1)).numpy()[0]
+    # u2 = torch.reshape(mean2+std2, (1,-1)).numpy()[0]
+    # ax.plot(test_x.numpy(), mean2, label = 'Model Green', color = '#006633', linewidth=2) # green
+    # ax.fill_between(test_x.numpy(), l2, u2, alpha=0.25, color = '#006633')
+    #
+    # mean3 = observed_pred[2][1]
+    # std3= observed_pred[2][2]
+    # l3 = torch.reshape(mean3-std3, (1,-1)).numpy()[0]
+    # u3 = torch.reshape(mean3+std3, (1,-1)).numpy()[0]
+    # ax.plot(test_x.numpy(), mean3, label = 'Model Red', color = '#FF0000', linewidth=2) # Red
+    # ax.fill_between(test_x.numpy(), l3, u3, alpha=0.25, color = '#FF0000')
 
 
     # Shade between the lower and upper confidence bounds
     # ax.fill_between(test_x.numpy(), lower.numpy(), upper.numpy(), alpha=0.5)
 
-    ax.set_ylabel('$\mathregular{s_{t+1}}$', fontsize=20)
-    ax.set_xlabel('$\mathregular{s_t}$, $\mathregular{a_t}$', fontsize=20)
+    # ax.set_ylabel('$\mathregular{s_{t+1}}$', fontsize=20)
+    # ax.set_xlabel('$\mathregular{s_t}$, $\mathregular{a_t}$', fontsize=20)
     ax.set_title('Deep PEs', fontsize=25)
     ax.set_ylim([-2, 2])
     ax.set_xlim([-3, 3])
@@ -231,7 +240,7 @@ with torch.no_grad():
         ax.spines[axis].set_linewidth(1)
 
 
-    ax.legend(['Observed Data', 'Ground Truth', 'Model Blue', 'Model Green', 'Model Red'], fontsize=15)
-    # ax.legend(['Observed Data', 'Function', 'Mean'], fontsize=15)
+    # ax.legend(['Observed Data', 'Ground Truth', 'Model Blue', 'Model Green', 'Model Red'], fontsize=15)
+    ax.legend(loc='lower left', fontsize=15)
 
 plt.show()
